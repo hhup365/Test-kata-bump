@@ -478,112 +478,81 @@ async function solveAltchaIfPresent(page, accountLogPrefix, maxAttempts = 15, wa
 
             let renewSuccess = false;
             let failureReason = '';
-            for (let attempt = 1; attempt <= RENEW_MAX_ATTEMPTS; attempt++) {
-                if (page.url().includes('login')) break;
-                
-                console.log(`${prefix} [尝试 ${attempt}/${RENEW_MAX_ATTEMPTS}] 定位 Renew 按钮...`);
-                const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
-                try { await renewBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { }
-                
-                if (await renewBtn.isVisible()) {
-                    await renewBtn.click();
-                    console.log(`${prefix} 模态框已触发，准备处理续订。`);
-                    const modal = page.locator('.modal-content, [role="dialog"]').filter({ hasText: 'Renew' }).first();
-                    try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { continue; }
-                    try { const box = await modal.boundingBox(); if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 }); } catch (e) { }
-                    
-                    const confirmBtn = modal.getByRole('button', { name: 'Renew', exact: true });
-                    if (await confirmBtn.isVisible()) {
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const sname = user.username.replace(/[^a-z0-9]/gi, '_');
-                        
-                        if (!await solveAltchaIfPresent(page, prefix, 15, 8000)) {
-                            failureReason = 'ALTCHA 挑战未通过';
-                            console.log(`${prefix} 刷新页面重试...`);
-                            await page.reload();
-                            await page.waitForTimeout(3000);
-                            continue;
-                        }
-                        
-                        console.log(`${prefix} 递交续订请求...`);
-                        await confirmBtn.click();
-                        
-                        let hasCaptchaError = false;
-                        try {
-                            const startVerify = Date.now();
-                            while (Date.now() - startVerify < 10000) {
-                                if (await page.getByText('Please complete the captcha to continue').isVisible()) {
-                                    hasCaptchaError = true;
-                                    break;
-                                }
-                                const notTimeLoc = page.getByText("You can't renew your server yet");
-                                if (await notTimeLoc.isVisible()) {
-                                    const text = await notTimeLoc.innerText().catch(() => '');
 
-                                    console.log(`${prefix} [调试] 页面原文: ${text}`);
+            console.log(`${prefix} 定位 Renew 按钮...`);
+            let renewBtn = page.locator('button[data-bs-target="#renew-modal"]').first();
+            if (await renewBtn.count() === 0) {
+                renewBtn = page.locator('button.btn.btn-outline-primary').first();
+            }
+            try { await renewBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { }
 
-                                    const match = text.match(/as of\s+(.*?)(?:\s+\(|$)/);
-                                    let dateStr = 'Unknown';
-                                    if (match && match[1]) {
-                                        dateStr = match[1].trim();
-                                        let pDate = new Date(dateStr + " UTC");
+            if (await renewBtn.count() > 0 && await renewBtn.isVisible()) {
+                await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
+                await page.waitForTimeout(800);
+                await renewBtn.click();
+                console.log(`${prefix} 已点击 Renew 按钮，等待确认框...`);
+                await page.waitForTimeout(3000);
 
-                                        if (isNaN(pDate) || pDate.getFullYear() < 2020) {
-                                            pDate = new Date(dateStr + " " + new Date().getFullYear() + " UTC");
-                                        }
+                const modal = page.locator('div.modal.show').first();
+                let modalShown = false;
+                try { await modal.waitFor({ state: 'visible', timeout: 5000 }); modalShown = true; } catch (e) { }
 
-                                        if (!isNaN(pDate)) {
-                                            updateState(user.username, pDate.toISOString());
-                                        } else {
-                                            console.log(`${prefix} ⚠️ 日期解析失败，原始字符串: "${dateStr}"，state.json 未更新`);
-                                        }
-                                    }
-                                    renewSuccess = true;
-                                    console.log(`${prefix} ⏳ 续订时间未到，允许续订时间: ${dateStr}`);
-                                    const spath = path.join(photoDir, `${sname}_skip.png`);
-                                    try { await page.screenshot({ path: spath, fullPage: true }); } catch (e) {}
-                                    await sendTelegramMessage(`⏳ <b>${escapeHtml(user.username)}</b>\nSkipped. Next Renew as of: ${dateStr}`, spath);
-                                    break;
-                                }
-                                await page.waitForTimeout(200);
-                            }
-                        } catch (e) { }
+                if (modalShown) {
+                    console.log(`${prefix} Renew 模态框已弹出，递交续订请求...`);
+                    const photoDir = path.join(process.cwd(), 'screenshots');
+                    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+                    const sname = user.username.replace(/[^a-z0-9]/gi, '_');
 
-                        if (renewSuccess) break;
-                        if (hasCaptchaError) {
-                            failureReason = '官方要求验证 Captcha';
-                            console.log(`${prefix} 遇到拦截错误，重试...`);
-                            await page.reload();
-                            await page.waitForTimeout(3000);
-                            continue;
-                        }
-                        
-                        await page.waitForTimeout(2000);
-                        if (!await modal.isVisible()) {
-                            console.log(`${prefix} ✅ 续期成功！`);
+                    try {
+                        await modal.locator('div.modal-footer button.btn.btn-primary').first().click({ timeout: 10000 });
+                    } catch (e) {
+                        await page.evaluate(() => {
+                            const m = document.querySelector('div.modal-footer button.btn.btn-primary');
+                            if (m) { m.click(); return; }
+                            document.querySelectorAll('button').forEach(b => { if (/renew/i.test(b.textContent)) b.click(); });
+                        });
+                    }
+                    await page.waitForTimeout(8000);
+
+                    console.log(`${prefix} 检查续期结果...`);
+                    let alertText = '';
+                    try { alertText = ((await page.locator('div.alert').first().innerText({ timeout: 4000 })) || '').trim(); } catch (e) { }
+                    if (!alertText) {
+                        await page.waitForTimeout(3000);
+                        try { alertText = ((await page.locator('div.alert').first().innerText({ timeout: 4000 })) || '').trim(); } catch (e) { }
+                    }
+
+                    if (alertText) {
+                        console.log(`${prefix} 页面提示: ${alertText}`);
+                        const low = alertText.toLowerCase();
+                        if (low.includes("can't renew") || low.includes('unable')) {
+                            const spath = path.join(photoDir, `${sname}_skip.png`);
+                            try { await page.screenshot({ path: spath, fullPage: true }); } catch (e) { }
+                            await sendTelegramMessage(`⏳ <b>${escapeHtml(user.username)}</b>\n${escapeHtml(alertText)}`, spath);
+                            renewSuccess = true;
+                        } else if (['renewed', 'success', 'extended'].some(kw => low.includes(kw))) {
                             const spath = path.join(photoDir, `${sname}_success.png`);
-                            try { await page.screenshot({ path: spath, fullPage: true }); } catch (e) {}
-                            await sendTelegramMessage(`✅ <b>${escapeHtml(user.username)}</b>\nRenewed successfully!`, spath);
+                            try { await page.screenshot({ path: spath, fullPage: true }); } catch (e) { }
+                            await sendTelegramMessage(`✅ <b>${escapeHtml(user.username)}</b>\n${escapeHtml(alertText)}`, spath);
                             updateState(user.username, null);
                             renewSuccess = true;
-                            break;
                         } else {
-                            console.log(`${prefix} ⚠️ 窗口未关闭，状态未知，将进行二次尝试...`);
-                            await page.reload();
-                            await page.waitForTimeout(3000);
-                            continue;
+                            const spath = path.join(photoDir, `${sname}_result.png`);
+                            try { await page.screenshot({ path: spath, fullPage: true }); } catch (e) { }
+                            await sendTelegramMessage(`ℹ️ <b>${escapeHtml(user.username)}</b>\n${escapeHtml(alertText)}`, spath);
+                            renewSuccess = true;
                         }
                     } else {
-                        await page.reload();
-                        await page.waitForTimeout(3000);
-                        continue;
+                        console.log(`${prefix} 未检测到明确的提示框，可能续期操作未生效`);
+                        failureReason = '未检测到续期结果提示';
                     }
-                } else { 
-                    console.log(`${prefix} 当前无需续期或找不到可用资源。`);
-                    break; 
+                } else {
+                    console.log(`${prefix} ⚠️ 模态框未弹出`);
+                    failureReason = 'Renew 模态框未弹出';
                 }
-            } 
+            } else {
+                console.log(`${prefix} 当前无需续期或找不到可用资源。`);
+            }
             if (!renewSuccess && failureReason) {
                 console.log(`${prefix} ❌ 最终续期失败: ${failureReason}`);
                 const failDir = path.join(process.cwd(), 'screenshots');
